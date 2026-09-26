@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+ <meta name="description" content="個人自用的股價監測條件設定工具，資料存放在本人的 OneDrive。">
 <title>XQ監測設定</title>
 <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2/lib/msal-browser.min.js"></script>
 <script>window.msal || document.write('<script src="https://unpkg.com/@azure/msal-browser@2/lib/msal-browser.min.js"><\/script>');</script>
@@ -41,11 +42,12 @@
 <body>
 
 <h2>XQ監測設定</h2>
+ <p class="muted" style="margin-top:-6px">個人自用工具：設定 XQ 股價監測的條件與門檻。登入由 Microsoft 官方頁面處理，本頁不會取得或儲存密碼。</p>
 
 <div class="card">
   <div class="row"><span id="user">尚未登入</span></div>
   <div class="row" style="margin-top:8px">
-    <button id="btnLogin" class="primary">登入 Microsoft</button>
+    <button id="btnLogin" class="primary">登入</button>
     <button id="btnReload" disabled>重新讀取</button>
     <button id="btnLogout" disabled>登出</button>
   </div>
