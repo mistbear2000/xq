@@ -17,12 +17,16 @@
   button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
   button:disabled { opacity: .45; cursor: default; }
   input[type=text] { font-size: 20px; padding: 10px; width: 140px; border: 1px solid #ccc; border-radius: 8px; }
+  select { font-size: 17px; padding: 8px; border: 1px solid #ccc; border-radius: 8px; background: #fff; }
+  select.op { width: 80px; }
+  select.thr { flex: 1; min-width: 150px; }
   #status { font-size: 14px; color: #666; margin-top: 6px; }
-  .title { font-size: 22px; font-weight: bold; margin-bottom: 4px; }
-  .group { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 18px; }
-  .group:last-child { border-bottom: none; }
+  .title { font-size: 22px; font-weight: bold; margin-bottom: 6px; }
+  .group { padding: 10px 0; border-bottom: 1px solid #eee; }
+  .group .glabel { font-size: 15px; color: #555; margin-bottom: 6px; }
   .muted { color: #999; }
   .warn { color: #c5221f; }
+  .ok { color: #188038; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; }
   th, td { padding: 8px 4px; border-bottom: 1px solid #eee; text-align: left; white-space: nowrap; }
   tbody tr { cursor: pointer; }
@@ -30,6 +34,7 @@
   .code { font-weight: bold; color: #1a73e8; }
   .tablewrap { overflow-x: auto; }
   #log { white-space: pre-wrap; font-size: 13px; color: #c5221f; }
+  #saveMsg { margin-top: 10px; font-size: 16px; }
 </style>
 </head>
 <body>
@@ -77,9 +82,9 @@ const app = new msal.PublicClientApplication({
 });
 
 const $ = id => document.getElementById(id);
-let stocks = [];                    // [{excelRow, code, c:[..3], t:[..3]}]
+let stocks = [];
 let options = { ops: [], thr: [] };
-let names = new Map();              // 代號 → 名稱
+let names = new Map();
 
 function setStatus(s) { $("status").textContent = s; }
 function showError(s) { $("log").textContent = s; }
@@ -109,6 +114,18 @@ async function graphGet(url) {
   const res = await fetch(url, { headers: { Authorization: "Bearer " + token } });
   if (!res.ok) throw new Error("HTTP " + res.status + "：" + (await res.text()).slice(0, 200));
   return res.json();
+}
+
+async function graphSend(method, url, body) {
+  const token = await getToken();
+  if (!token) throw new Error("需要重新登入");
+  const res = await fetch(url, {
+    method: method,
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status + "：" + (await res.text()).slice(0, 200));
+  return res.status === 204 ? null : res.json();
 }
 
 async function loadAll() {
@@ -147,7 +164,6 @@ async function loadAll() {
 
     renderList();
     setStatus("已讀取 " + stocks.length + " 檔，" + new Date().toLocaleTimeString());
-    if ($("code").value.trim()) query();
   } catch (e) {
     setStatus("");
     showError("讀取失敗：" + e.message);
@@ -176,6 +192,15 @@ function renderList() {
   });
 }
 
+function selectHtml(id, cls, list, cur) {
+  const opts = [""].concat(list);
+  if (cur && opts.indexOf(cur) < 0) opts.push(cur);
+  return "<select id='" + id + "' class='" + cls + "'>" +
+    opts.map(o => "<option value='" + esc(o) + "'" + (o === cur ? " selected" : "") + ">" +
+                  (o ? esc(o) : "（無）") + "</option>").join("") +
+    "</select>";
+}
+
 function query() {
   const code = $("code").value.trim();
   if (!code) { $("result").innerHTML = ""; return; }
@@ -192,9 +217,52 @@ function query() {
   $("result").innerHTML =
     "<div class='title'>" + esc(label(s.code)) + "</div>" +
     [0, 1, 2].map(g =>
-      "<div class='group'><span>條件組" + (g + 1) + "</span><span>" +
-      (esc(groupText(s, g)) || "<span class='muted'>未設定</span>") + "</span></div>"
-    ).join("");
+      "<div class='group'><div class='glabel'>條件組" + (g + 1) + "</div><div class='row'>" +
+      selectHtml("op" + g, "op", options.ops, s.c[g]) +
+      selectHtml("thr" + g, "thr", options.thr, s.t[g]) +
+      "</div></div>"
+    ).join("") +
+    "<div class='row' style='margin-top:12px'><button id='btnSave' class='primary'>儲存修改</button></div>" +
+    "<div id='saveMsg'></div>";
+  $("btnSave").onclick = () => saveEdit(s);
+}
+
+async function saveEdit(s) {
+  const msg = t => { $("saveMsg").innerHTML = t; };
+  const vals = [];
+  for (let g = 0; g < 3; g++) {
+    const op = $("op" + g).value;
+    const thr = $("thr" + g).value;
+    if ((op && !thr) || (!op && thr)) {
+      msg("<span class='warn'>條件組" + (g + 1) + "：比較符號和門檻值要一起設定，或一起選「（無）」</span>");
+      return;
+    }
+    vals.push(op, thr);
+  }
+  const old = [s.c[0], s.t[0], s.c[1], s.t[1], s.c[2], s.t[2]];
+  if (vals.every((v, i) => v === old[i])) {
+    msg("<span class='muted'>沒有變更</span>");
+    return;
+  }
+
+  $("btnSave").disabled = true;
+  msg("儲存中...");
+  try {
+    const r = s.excelRow;
+    const chk = await graphGet(sheetUrl("監控清單") + "/range(address='A" + r + "')?$select=values");
+    if (cellText(chk.values[0][0]) !== s.code) {
+      msg("<span class='warn'>雲端資料已被其他裝置變動，為避免改錯股票，請按「重新讀取」後再修改</span>");
+      $("btnSave").disabled = false;
+      return;
+    }
+    await graphSend("PATCH", sheetUrl("監控清單") + "/range(address='B" + r + ":G" + r + "')", { values: [vals] });
+    await loadAll();
+    query();
+    $("saveMsg").innerHTML = "<span class='ok'>✔ 已儲存！本機約 30 秒內自動套用，Discord 會收到【設定更新】通知</span>";
+  } catch (e) {
+    msg("<span class='warn'>儲存失敗：" + esc(e.message) + "</span>");
+    $("btnSave").disabled = false;
+  }
 }
 
 function showUser(acc) {
@@ -207,7 +275,7 @@ function showUser(acc) {
 
 $("btnLogin").onclick = () => app.loginRedirect({ scopes: SCOPES });
 $("btnLogout").onclick = () => app.logoutRedirect();
-$("btnReload").onclick = loadAll;
+$("btnReload").onclick = async () => { await loadAll(); if ($("code").value.trim()) query(); };
 $("btnQuery").onclick = query;
 $("code").addEventListener("keydown", e => { if (e.key === "Enter") query(); });
 
