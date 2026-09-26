@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XQ監測設定</title>
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+<style>
+  body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 0 16px; }
+  button { font-size: 18px; padding: 10px 20px; margin: 6px 6px 6px 0; }
+  #log { white-space: pre-wrap; background: #f4f4f4; padding: 10px; border-radius: 6px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h2>XQ監測設定（登入測試）</h2>
+<div id="user">尚未登入</div>
+<button id="btnLogin">登入 Microsoft</button>
+<button id="btnTest" disabled>測試讀取監控清單</button>
+<button id="btnLogout" disabled>登出</button>
+<div id="log"></div>
+
+<script>
+const CLIENT_ID = "ca3f7074-4879-4adb-9aa0-99762db21645";
+const REDIRECT_URI = "https://mistbear2000.github.io/xq/";
+const SCOPES = ["Files.ReadWrite", "User.Read"];
+
+const app = new msal.PublicClientApplication({
+  auth: {
+    clientId: CLIENT_ID,
+    authority: "https://login.microsoftonline.com/consumers",
+    redirectUri: REDIRECT_URI
+  },
+  cache: { cacheLocation: "localStorage" }
+});
+
+const $ = id => document.getElementById(id);
+function log(s) { $("log").textContent += s + "\n"; }
+
+function showUser(acc) {
+  $("user").textContent = "已登入：" + acc.username;
+  $("btnLogin").disabled = true;
+  $("btnTest").disabled = false;
+  $("btnLogout").disabled = false;
+}
+
+async function init() {
+  try {
+    const r = await app.handleRedirectPromise();
+    if (r && r.account) app.setActiveAccount(r.account);
+    const acc = app.getActiveAccount() || app.getAllAccounts()[0];
+    if (acc) {
+      app.setActiveAccount(acc);
+      showUser(acc);
+    }
+  } catch (e) {
+    log("登入錯誤：" + e.message);
+  }
+}
+
+async function getToken() {
+  const acc = app.getActiveAccount();
+  try {
+    const r = await app.acquireTokenSilent({ scopes: SCOPES, account: acc });
+    return r.accessToken;
+  } catch (e) {
+    await app.acquireTokenRedirect({ scopes: SCOPES });
+    return null;
+  }
+}
+
+$("btnLogin").onclick = () => app.loginRedirect({ scopes: SCOPES });
+$("btnLogout").onclick = () => app.logoutRedirect();
+
+$("btnTest").onclick = async () => {
+  log("讀取中...");
+  const token = await getToken();
+  if (!token) return;
+  const url = "https://graph.microsoft.com/v1.0/me/drive/root:/XQSettings/" +
+    encodeURIComponent("監控設定.xlsx") +
+    ":/workbook/worksheets('" + encodeURIComponent("監控清單") + "')/usedRange?$select=values";
+  const res = await fetch(url, { headers: { Authorization: "Bearer " + token } });
+  if (!res.ok) {
+    log("讀取失敗 HTTP " + res.status + "：" + (await res.text()).slice(0, 300));
+    return;
+  }
+  const data = await res.json();
+  const rows = data.values.slice(1).filter(r => String(r[0]).trim() !== "");
+  log("讀取成功！共 " + rows.length + " 檔");
+  rows.slice(0, 5).forEach(r => log(r.join(" | ")));
+};
+
+init();
+</script>
+</body>
+</html>
