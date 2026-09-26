@@ -15,6 +15,7 @@
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   button { font-size: 17px; padding: 10px 16px; border: 1px solid #ccc; border-radius: 8px; background: #fff; cursor: pointer; }
   button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+  button.danger { background: #fff; color: #c5221f; border-color: #c5221f; }
   button:disabled { opacity: .45; cursor: default; }
   input[type=text] { font-size: 20px; padding: 10px; width: 140px; border: 1px solid #ccc; border-radius: 8px; }
   select { font-size: 17px; padding: 8px; border: 1px solid #ccc; border-radius: 8px; background: #fff; }
@@ -75,6 +76,7 @@ const CLIENT_ID = "ca3f7074-4879-4adb-9aa0-99762db21645";
 const REDIRECT_URI = "https://mistbear2000.github.io/xq/";
 const SCOPES = ["Files.ReadWrite", "User.Read"];
 const FILE_PATH = "XQSettings/" + encodeURIComponent("監控設定.xlsx");
+const CAPACITY_WARN = 40;
 
 const app = new msal.PublicClientApplication({
   auth: { clientId: CLIENT_ID, authority: "https://login.microsoftonline.com/consumers", redirectUri: REDIRECT_URI },
@@ -83,6 +85,8 @@ const app = new msal.PublicClientApplication({
 
 const $ = id => document.getElementById(id);
 let stocks = [];
+let emptyRows = [];
+let nextRow = 2;
 let options = { ops: [], thr: [] };
 let names = new Map();
 
@@ -92,6 +96,7 @@ function cellText(v) { return (v === null || v === undefined) ? "" : String(v).t
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function nameOf(code) { return names.get(code) || ""; }
 function label(code) { return code + nameOf(code); }
+function msg(t) { const m = $("saveMsg"); if (m) m.innerHTML = t; }
 
 async function getToken() {
   const acc = app.getActiveAccount();
@@ -128,6 +133,11 @@ async function graphSend(method, url, body) {
   return res.status === 204 ? null : res.json();
 }
 
+async function readCellA(r) {
+  const chk = await graphGet(sheetUrl("監控清單") + "/range(address='A" + r + "')?$select=values");
+  return cellText(chk.values[0][0]);
+}
+
 async function loadAll() {
   showError("");
   setStatus("讀取中...");
@@ -147,10 +157,11 @@ async function loadAll() {
 
     const startRow = (watch.rowIndex || 0) + 1;
     stocks = [];
+    emptyRows = [];
     watch.values.forEach((r, i) => {
       if (i === 0) return;
       const code = cellText(r[0]);
-      if (!code) return;
+      if (!code) { emptyRows.push(startRow + i); return; }
       stocks.push({
         excelRow: startRow + i,
         code: code,
@@ -158,6 +169,7 @@ async function loadAll() {
         t: [cellText(r[2]), cellText(r[4]), cellText(r[6])]
       });
     });
+    nextRow = startRow + watch.values.length;
 
     options.ops = opt.values.slice(1).map(r => cellText(r[0])).filter(x => x);
     options.thr = opt.values.slice(1).map(r => cellText(r[1])).filter(x => x);
@@ -201,67 +213,137 @@ function selectHtml(id, cls, list, cur) {
     "</select>";
 }
 
-function query() {
-  const code = $("code").value.trim();
-  if (!code) { $("result").innerHTML = ""; return; }
-  const s = stocks.find(x => x.code === code);
-  if (!s) {
-    if (names.has(code)) {
-      $("result").innerHTML = "<div class='title'>" + esc(label(code)) + "</div>" +
-                              "<div class='muted'>目前不在監控清單中</div>";
-    } else {
-      $("result").innerHTML = "<div class='warn'>查無此代號：" + esc(code) + "</div>";
-    }
-    return;
-  }
-  $("result").innerHTML =
-    "<div class='title'>" + esc(label(s.code)) + "</div>" +
-    [0, 1, 2].map(g =>
-      "<div class='group'><div class='glabel'>條件組" + (g + 1) + "</div><div class='row'>" +
-      selectHtml("op" + g, "op", options.ops, s.c[g]) +
-      selectHtml("thr" + g, "thr", options.thr, s.t[g]) +
-      "</div></div>"
-    ).join("") +
-    "<div class='row' style='margin-top:12px'><button id='btnSave' class='primary'>儲存修改</button></div>" +
-    "<div id='saveMsg'></div>";
-  $("btnSave").onclick = () => saveEdit(s);
+function editorHtml(c, t) {
+  return [0, 1, 2].map(g =>
+    "<div class='group'><div class='glabel'>條件組" + (g + 1) + "</div><div class='row'>" +
+    selectHtml("op" + g, "op", options.ops, c[g]) +
+    selectHtml("thr" + g, "thr", options.thr, t[g]) +
+    "</div></div>"
+  ).join("");
 }
 
-async function saveEdit(s) {
-  const msg = t => { $("saveMsg").innerHTML = t; };
+// 讀取畫面上的三組設定；不成對時回傳 null
+function readEditor() {
   const vals = [];
   for (let g = 0; g < 3; g++) {
     const op = $("op" + g).value;
     const thr = $("thr" + g).value;
     if ((op && !thr) || (!op && thr)) {
       msg("<span class='warn'>條件組" + (g + 1) + "：比較符號和門檻值要一起設定，或一起選「（無）」</span>");
-      return;
+      return null;
     }
     vals.push(op, thr);
   }
-  const old = [s.c[0], s.t[0], s.c[1], s.t[1], s.c[2], s.t[2]];
-  if (vals.every((v, i) => v === old[i])) {
-    msg("<span class='muted'>沒有變更</span>");
+  return vals;
+}
+
+function query() {
+  const code = $("code").value.trim();
+  if (!code) { $("result").innerHTML = ""; return; }
+  const s = stocks.find(x => x.code === code);
+
+  if (s) {
+    $("result").innerHTML =
+      "<div class='title'>" + esc(label(s.code)) + "</div>" +
+      editorHtml(s.c, s.t) +
+      "<div class='row' style='margin-top:12px'>" +
+      "<button id='btnSave' class='primary'>儲存修改</button>" +
+      "<button id='btnDelete' class='danger'>刪除</button>" +
+      "</div><div id='saveMsg'></div>";
+    $("btnSave").onclick = () => saveEdit(s);
+    $("btnDelete").onclick = () => deleteStock(s);
     return;
   }
+
+  if (!names.has(code)) {
+    $("result").innerHTML = "<div class='warn'>查無此代號：" + esc(code) + "</div>";
+    return;
+  }
+
+  $("result").innerHTML =
+    "<div class='title'>" + esc(label(code)) + "</div>" +
+    "<div class='muted'>目前不在監控清單中，可設定條件後加入</div>" +
+    editorHtml(["", "", ""], ["", "", ""]) +
+    "<div class='row' style='margin-top:12px'>" +
+    "<button id='btnAdd' class='primary'>加入監控清單</button>" +
+    "</div><div id='saveMsg'></div>";
+  $("btnAdd").onclick = () => addStock(code);
+  if (stocks.length >= CAPACITY_WARN) {
+    msg("<span class='warn'>提醒：目前已有 " + stocks.length + " 檔，本機監控清單的公式約預填到 44 檔，請留意容量</span>");
+  }
+}
+
+async function saveEdit(s) {
+  const vals = readEditor();
+  if (!vals) return;
+  const old = [s.c[0], s.t[0], s.c[1], s.t[1], s.c[2], s.t[2]];
+  if (vals.every((v, i) => v === old[i])) { msg("<span class='muted'>沒有變更</span>"); return; }
 
   $("btnSave").disabled = true;
   msg("儲存中...");
   try {
     const r = s.excelRow;
-    const chk = await graphGet(sheetUrl("監控清單") + "/range(address='A" + r + "')?$select=values");
-    if (cellText(chk.values[0][0]) !== s.code) {
-      msg("<span class='warn'>雲端資料已被其他裝置變動，為避免改錯股票，請按「重新讀取」後再修改</span>");
+    if (await readCellA(r) !== s.code) {
+      msg("<span class='warn'>雲端資料已被其他裝置變動，為避免改錯股票，請按「重新讀取」後再操作</span>");
       $("btnSave").disabled = false;
       return;
     }
     await graphSend("PATCH", sheetUrl("監控清單") + "/range(address='B" + r + ":G" + r + "')", { values: [vals] });
     await loadAll();
     query();
-    $("saveMsg").innerHTML = "<span class='ok'>✔ 已儲存！本機約 30 秒內自動套用，Discord 會收到【設定更新】通知</span>";
+    msg("<span class='ok'>✔ 已儲存！本機約 30 秒內自動套用，Discord 會收到【設定更新】通知</span>");
   } catch (e) {
     msg("<span class='warn'>儲存失敗：" + esc(e.message) + "</span>");
     $("btnSave").disabled = false;
+  }
+}
+
+async function addStock(code) {
+  const vals = readEditor();
+  if (!vals) return;
+  if (stocks.find(x => x.code === code)) { msg("<span class='warn'>" + esc(code) + " 已在監控清單中</span>"); return; }
+
+  $("btnAdd").disabled = true;
+  msg("新增中...");
+  try {
+    const r = emptyRows.length ? emptyRows[0] : nextRow;
+    if (await readCellA(r) !== "") {
+      msg("<span class='warn'>雲端資料已被其他裝置變動，請按「重新讀取」後再新增</span>");
+      $("btnAdd").disabled = false;
+      return;
+    }
+    const codeVal = /^[1-9]\d*$/.test(code) ? Number(code) : code;
+    await graphSend("PATCH", sheetUrl("監控清單") + "/range(address='A" + r + ":G" + r + "')",
+                    { values: [[codeVal].concat(vals)] });
+    await loadAll();
+    query();
+    msg("<span class='ok'>✔ 已加入監控清單！本機約 30 秒內自動新增，Discord 會收到【設定更新】通知</span>");
+  } catch (e) {
+    msg("<span class='warn'>新增失敗：" + esc(e.message) + "</span>");
+    $("btnAdd").disabled = false;
+  }
+}
+
+async function deleteStock(s) {
+  if (!confirm("確定要從監控清單刪除「" + label(s.code) + "」嗎？\n\n本機約 30 秒內會移除並停止監控這一檔。")) return;
+
+  $("btnDelete").disabled = true;
+  msg("刪除中...");
+  try {
+    const r = s.excelRow;
+    if (await readCellA(r) !== s.code) {
+      msg("<span class='warn'>雲端資料已被其他裝置變動，為避免刪錯股票，請按「重新讀取」後再操作</span>");
+      $("btnDelete").disabled = false;
+      return;
+    }
+    await graphSend("PATCH", sheetUrl("監控清單") + "/range(address='A" + r + ":G" + r + "')",
+                    { values: [["", "", "", "", "", "", ""]] });
+    await loadAll();
+    query();
+    msg("<span class='ok'>✔ 已刪除！本機約 30 秒內自動移除，Discord 會收到【設定更新】通知</span>");
+  } catch (e) {
+    msg("<span class='warn'>刪除失敗：" + esc(e.message) + "</span>");
+    $("btnDelete").disabled = false;
   }
 }
 
