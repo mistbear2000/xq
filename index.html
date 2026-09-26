@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>XQ監測設定</title>
-<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2/lib/msal-browser.min.js"></script>
+<script>window.msal || document.write('<script src="https://unpkg.com/@azure/msal-browser@2/lib/msal-browser.min.js"><\/script>');</script>
+<script>if (!window.msal) alert("登入程式庫載入失敗，請檢查網路或稍後再試");</script>
 <style>
   body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 0 16px; }
   button { font-size: 18px; padding: 10px 20px; margin: 6px 6px 6px 0; }
