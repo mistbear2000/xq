@@ -8,44 +8,210 @@
 <script>window.msal || document.write('<script src="https://unpkg.com/@azure/msal-browser@2/lib/msal-browser.min.js"><\/script>');</script>
 <script>if (!window.msal) alert("登入程式庫載入失敗，請檢查網路或稍後再試");</script>
 <style>
-  body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 0 16px; }
-  button { font-size: 18px; padding: 10px 20px; margin: 6px 6px 6px 0; }
-  #log { white-space: pre-wrap; background: #f4f4f4; padding: 10px; border-radius: 6px; margin-top: 12px; }
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft JhengHei", sans-serif; max-width: 680px; margin: 0 auto; padding: 12px; background: #f5f6f8; color: #222; }
+  h2 { margin: 8px 0 12px; }
+  .card { background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { font-size: 17px; padding: 10px 16px; border: 1px solid #ccc; border-radius: 8px; background: #fff; cursor: pointer; }
+  button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=text] { font-size: 20px; padding: 10px; width: 140px; border: 1px solid #ccc; border-radius: 8px; }
+  #status { font-size: 14px; color: #666; margin-top: 6px; }
+  .title { font-size: 22px; font-weight: bold; margin-bottom: 4px; }
+  .group { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 18px; }
+  .group:last-child { border-bottom: none; }
+  .muted { color: #999; }
+  .warn { color: #c5221f; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { padding: 8px 4px; border-bottom: 1px solid #eee; text-align: left; white-space: nowrap; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #eef4ff; }
+  .code { font-weight: bold; color: #1a73e8; }
+  .tablewrap { overflow-x: auto; }
+  #log { white-space: pre-wrap; font-size: 13px; color: #c5221f; }
 </style>
 </head>
 <body>
-<h2>XQ監測設定（登入測試）</h2>
-<div id="user">尚未登入</div>
-<button id="btnLogin">登入 Microsoft</button>
-<button id="btnTest" disabled>測試讀取監控清單</button>
-<button id="btnLogout" disabled>登出</button>
-<div id="log"></div>
+
+<h2>XQ監測設定</h2>
+
+<div class="card">
+  <div class="row"><span id="user">尚未登入</span></div>
+  <div class="row" style="margin-top:8px">
+    <button id="btnLogin" class="primary">登入 Microsoft</button>
+    <button id="btnReload" disabled>重新讀取</button>
+    <button id="btnLogout" disabled>登出</button>
+  </div>
+  <div id="status"></div>
+  <div id="log"></div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <input type="text" id="code" placeholder="期股代號" inputmode="numeric">
+    <button id="btnQuery" class="primary" disabled>查詢</button>
+  </div>
+  <div id="result" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+  <b>監控清單</b> <span id="count" class="muted"></span>
+  <div class="tablewrap">
+    <table style="margin-top:8px">
+      <thead><tr><th>股票</th><th>條件1</th><th>條件2</th><th>條件3</th></tr></thead>
+      <tbody id="list"></tbody>
+    </table>
+  </div>
+</div>
 
 <script>
 const CLIENT_ID = "ca3f7074-4879-4adb-9aa0-99762db21645";
 const REDIRECT_URI = "https://mistbear2000.github.io/xq/";
 const SCOPES = ["Files.ReadWrite", "User.Read"];
+const FILE_PATH = "XQSettings/" + encodeURIComponent("監控設定.xlsx");
 
 const app = new msal.PublicClientApplication({
-  auth: {
-    clientId: CLIENT_ID,
-    authority: "https://login.microsoftonline.com/consumers",
-    redirectUri: REDIRECT_URI
-  },
+  auth: { clientId: CLIENT_ID, authority: "https://login.microsoftonline.com/consumers", redirectUri: REDIRECT_URI },
   cache: { cacheLocation: "localStorage" }
 });
 
 const $ = id => document.getElementById(id);
-function log(s) { $("log").textContent += s + "\n"; }
+let stocks = [];                    // [{excelRow, code, c:[..3], t:[..3]}]
+let options = { ops: [], thr: [] };
+let names = new Map();              // 代號 → 名稱
+
+function setStatus(s) { $("status").textContent = s; }
+function showError(s) { $("log").textContent = s; }
+function cellText(v) { return (v === null || v === undefined) ? "" : String(v).trim(); }
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function nameOf(code) { return names.get(code) || ""; }
+function label(code) { return code + nameOf(code); }
+
+async function getToken() {
+  const acc = app.getActiveAccount();
+  try {
+    return (await app.acquireTokenSilent({ scopes: SCOPES, account: acc })).accessToken;
+  } catch (e) {
+    await app.acquireTokenRedirect({ scopes: SCOPES });
+    return null;
+  }
+}
+
+function sheetUrl(sheet) {
+  return "https://graph.microsoft.com/v1.0/me/drive/root:/" + FILE_PATH +
+         ":/workbook/worksheets('" + encodeURIComponent(sheet) + "')";
+}
+
+async function graphGet(url) {
+  const token = await getToken();
+  if (!token) throw new Error("需要重新登入");
+  const res = await fetch(url, { headers: { Authorization: "Bearer " + token } });
+  if (!res.ok) throw new Error("HTTP " + res.status + "：" + (await res.text()).slice(0, 200));
+  return res.json();
+}
+
+async function loadAll() {
+  showError("");
+  setStatus("讀取中...");
+  $("btnReload").disabled = true;
+  try {
+    const [watch, opt, nm] = await Promise.all([
+      graphGet(sheetUrl("監控清單") + "/usedRange?$select=values,rowIndex"),
+      graphGet(sheetUrl("選項") + "/usedRange?$select=values"),
+      graphGet(sheetUrl("股票名稱") + "/usedRange?$select=values")
+    ]);
+
+    names = new Map();
+    nm.values.slice(1).forEach(r => {
+      const c = cellText(r[0]);
+      if (c) names.set(c, cellText(r[1]));
+    });
+
+    const startRow = (watch.rowIndex || 0) + 1;
+    stocks = [];
+    watch.values.forEach((r, i) => {
+      if (i === 0) return;
+      const code = cellText(r[0]);
+      if (!code) return;
+      stocks.push({
+        excelRow: startRow + i,
+        code: code,
+        c: [cellText(r[1]), cellText(r[3]), cellText(r[5])],
+        t: [cellText(r[2]), cellText(r[4]), cellText(r[6])]
+      });
+    });
+
+    options.ops = opt.values.slice(1).map(r => cellText(r[0])).filter(x => x);
+    options.thr = opt.values.slice(1).map(r => cellText(r[1])).filter(x => x);
+
+    renderList();
+    setStatus("已讀取 " + stocks.length + " 檔，" + new Date().toLocaleTimeString());
+    if ($("code").value.trim()) query();
+  } catch (e) {
+    setStatus("");
+    showError("讀取失敗：" + e.message);
+  }
+  $("btnReload").disabled = false;
+}
+
+function groupText(s, g) {
+  return (s.c[g] || s.t[g]) ? (s.c[g] + " " + s.t[g]) : "";
+}
+
+function renderList() {
+  $("count").textContent = "（" + stocks.length + " 檔）";
+  $("list").innerHTML = stocks.map(s =>
+    "<tr data-code='" + esc(s.code) + "'>" +
+    "<td class='code'>" + esc(label(s.code)) + "</td>" +
+    [0, 1, 2].map(g => "<td>" + (esc(groupText(s, g)) || "<span class='muted'>—</span>") + "</td>").join("") +
+    "</tr>"
+  ).join("");
+  $("list").querySelectorAll("tr").forEach(tr => {
+    tr.onclick = () => {
+      $("code").value = tr.dataset.code;
+      query();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    };
+  });
+}
+
+function query() {
+  const code = $("code").value.trim();
+  if (!code) { $("result").innerHTML = ""; return; }
+  const s = stocks.find(x => x.code === code);
+  if (!s) {
+    if (names.has(code)) {
+      $("result").innerHTML = "<div class='title'>" + esc(label(code)) + "</div>" +
+                              "<div class='muted'>目前不在監控清單中</div>";
+    } else {
+      $("result").innerHTML = "<div class='warn'>查無此代號：" + esc(code) + "</div>";
+    }
+    return;
+  }
+  $("result").innerHTML =
+    "<div class='title'>" + esc(label(s.code)) + "</div>" +
+    [0, 1, 2].map(g =>
+      "<div class='group'><span>條件組" + (g + 1) + "</span><span>" +
+      (esc(groupText(s, g)) || "<span class='muted'>未設定</span>") + "</span></div>"
+    ).join("");
+}
 
 function showUser(acc) {
   $("user").textContent = "已登入：" + acc.username;
-  $("btnLogin").disabled = true;
-  $("btnTest").disabled = false;
+  $("btnLogin").style.display = "none";
+  $("btnReload").disabled = false;
   $("btnLogout").disabled = false;
+  $("btnQuery").disabled = false;
 }
 
-async function init() {
+$("btnLogin").onclick = () => app.loginRedirect({ scopes: SCOPES });
+$("btnLogout").onclick = () => app.logoutRedirect();
+$("btnReload").onclick = loadAll;
+$("btnQuery").onclick = query;
+$("code").addEventListener("keydown", e => { if (e.key === "Enter") query(); });
+
+(async () => {
   try {
     const r = await app.handleRedirectPromise();
     if (r && r.account) app.setActiveAccount(r.account);
@@ -53,45 +219,12 @@ async function init() {
     if (acc) {
       app.setActiveAccount(acc);
       showUser(acc);
+      loadAll();
     }
   } catch (e) {
-    log("登入錯誤：" + e.message);
+    showError("登入錯誤：" + e.message);
   }
-}
-
-async function getToken() {
-  const acc = app.getActiveAccount();
-  try {
-    const r = await app.acquireTokenSilent({ scopes: SCOPES, account: acc });
-    return r.accessToken;
-  } catch (e) {
-    await app.acquireTokenRedirect({ scopes: SCOPES });
-    return null;
-  }
-}
-
-$("btnLogin").onclick = () => app.loginRedirect({ scopes: SCOPES });
-$("btnLogout").onclick = () => app.logoutRedirect();
-
-$("btnTest").onclick = async () => {
-  log("讀取中...");
-  const token = await getToken();
-  if (!token) return;
-  const url = "https://graph.microsoft.com/v1.0/me/drive/root:/XQSettings/" +
-    encodeURIComponent("監控設定.xlsx") +
-    ":/workbook/worksheets('" + encodeURIComponent("監控清單") + "')/usedRange?$select=values";
-  const res = await fetch(url, { headers: { Authorization: "Bearer " + token } });
-  if (!res.ok) {
-    log("讀取失敗 HTTP " + res.status + "：" + (await res.text()).slice(0, 300));
-    return;
-  }
-  const data = await res.json();
-  const rows = data.values.slice(1).filter(r => String(r[0]).trim() !== "");
-  log("讀取成功！共 " + rows.length + " 檔");
-  rows.slice(0, 5).forEach(r => log(r.join(" | ")));
-};
-
-init();
+})();
 </script>
 </body>
 </html>
